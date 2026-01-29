@@ -1,0 +1,17 @@
+{
+    "name": "playback-downloader",
+    "version": "1.0.0",
+    "description": "Web scraper untuk 192.168.88.19",
+    "main": "scraper.js",
+    "scripts": {
+        "start": "node scraper.js",
+        "dev": "nodemon scraper.js"
+    },
+    "dependencies": {
+        "js-yaml": "^4.1.1",
+        "puppeteer": "^24.15.0"
+    },
+    "devDependencies": {
+        "nodemon": "^3.0.2"
+    }
+}

@@ -1,0 +1,17 @@
+# Contoh cron untuk menjalankan scraper.js setiap hari jam 00:01
+# Format: menit jam hari-bulan bulan hari-minggu perintah
+
+1 0 * * * /usr/bin/node /path/to/PlaybackDownloader/scraper.js >> /path/to/PlaybackDownloader/cron.log 2>&1
+0 1 * * * /usr/bin/node /path/to/PlaybackDownloader/scraper.js >> /path/to/PlaybackDownloader/cron.log 2>&1
+
+# Penjelasan:
+# 1 0 * * *   → setiap hari jam 00:01
+# /usr/bin/node → path ke binary nodejs (cek dengan `which node`)
+# /path/to/PlaybackDownloader/scraper.js → ganti dengan path absolut ke script kamu
+# >> .../cron.log 2>&1 → simpan output dan error ke file log
+
+# Untuk edit cron:
+# crontab -e
+
+# Untuk cek cron sudah aktif:
+# crontab -l
