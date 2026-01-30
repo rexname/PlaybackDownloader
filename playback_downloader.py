@@ -182,7 +182,7 @@ class DeviceScraper:
             # Format: IP_CHANNEL_STARTTIME_ENDTIME.mp4
             # Time format: YYYYMMDDHHmmss
             full_match = re.search(
-                r"\d+\.\d+\.\d+\.\d+_(\d+)_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.mp4$",
+                r"\d+\.\d+\.\d+\.\d+_(\d{3})_(\d{14})([A-F0-9]{4})\.mp4$",
                 filename,
             )
 
@@ -192,34 +192,27 @@ class DeviceScraper:
 
             # Extract components
             channel_num = int(full_match.group(1))
+            timestamp = full_match.group(2)
+            # random_hex = full_match.group(3)  # not used
 
-            # Start time
-            start_year = full_match.group(2)
-            start_month = full_match.group(3)
-            start_day = full_match.group(4)
-            start_hour = full_match.group(5)
-            start_minute = full_match.group(6)
-            start_second = full_match.group(7)
-
-            # End time
-            end_year = full_match.group(8)
-            end_month = full_match.group(9)
-            end_day = full_match.group(10)
-            end_hour = full_match.group(11)
-            end_minute = full_match.group(12)
-            end_second = full_match.group(13)
+            # Parse timestamp
+            start_year = timestamp[0:4]
+            start_month = timestamp[4:6]
+            start_day = timestamp[6:8]
+            start_hour = timestamp[8:10]
+            start_minute = timestamp[10:12]
+            start_second = timestamp[12:14]
 
             # Format components
             date_str = f"{start_year}-{start_month}-{start_day}"
             start_formatted = f"{start_hour}-{start_minute}-{start_second}"
-            end_formatted = f"{end_hour}-{end_minute}-{end_second}"
 
             # Create channel folder
             channel_folder = self.organized_dir / f"channel{channel_num}"
             channel_folder.mkdir(exist_ok=True)
 
             # Generate new filename
-            new_filename = f"{date_str}.{start_formatted}_{end_formatted}.mp4"
+            new_filename = f"{date_str}.{start_formatted}.mp4"
 
             old_path = self.download_dir / filename
             new_path = channel_folder / new_filename
@@ -779,6 +772,7 @@ async def download_playback(scraper: DeviceScraper):
             return
 
         # Filter active channels [1] through [21]
+        # Channel 1 sampai 21
         active_channels = []
         for ch in channels:
             match = re.match(r"^\[(\d+)\]", ch["label"])
@@ -823,7 +817,7 @@ async def download_playback(scraper: DeviceScraper):
             page_info = await scraper.get_pagination_info()
             all_table_data = []
 
-            for page in range(1, page_info["total"] + 1):
+            for page in range(1, page_info["total"] + 1): #Page loop
                 if page > 1:
                     scraper.log(f"[*] Navigasi ke halaman {page}...")
                     await scraper.page.evaluate(
