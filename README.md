@@ -7,6 +7,8 @@ Script Python untuk mengunduh rekaman playback dari DVR/NVR secara otomatis meng
 - Login otomatis ke sistem DVR/NVR
 - Download rekaman dari semua channel (1-21)
 - **Organisasi file REAL-TIME** - file langsung dipindahkan saat selesai download
+- **Auto-retry** - jika ada file gagal, otomatis retry sampai 3x
+- **Skip file yang sudah ada** - tidak download ulang file yang sudah tersimpan
 - Logging lengkap ke file
 - Support pagination untuk banyak file
 - Graceful shutdown dengan CTRL+C
@@ -141,8 +143,13 @@ Pastikan folder `downloads/` memiliki permission write
 
 - Script menggunakan headless browser (tidak tampil UI)
 - Timeout default download: 10 menit per halaman
-- Script akan skip file yang gagal dan lanjut ke file berikutnya
+- **Auto-retry:** Jika ada file gagal, script otomatis retry page tersebut (max 3x)
+- **Skip duplicates:** File yang sudah ada tidak akan didownload ulang
 - Log lengkap tersimpan di `downloads/log.txt`
+- Log akan menunjukkan:
+  - `[SKIP] File already exists: ...` - file sudah ada, dilewati
+  - `[RETRY] Attempt 2/3 for page X` - sedang retry
+  - `[✓] Organized: ... → channelX/...` - file berhasil diorganisir
 
 ## Stop Script
 
