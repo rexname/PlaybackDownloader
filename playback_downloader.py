@@ -6,7 +6,7 @@ import signal
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from playwright.async_api import Browser, Page, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeout
@@ -28,17 +28,23 @@ class DeviceScraper:
         self.download_dir = self.script_dir / "downloads"
         self.organized_dir = self.download_dir / "cctv"
         self.log_file = self.download_dir / "log.txt"
+        self.downloaded_files_db = self.script_dir / "downloaded_files.json"
 
         # Download tracking
         self.pending_downloads = []
         self.completed_downloads = []
+        self.downloaded_files_set: Set[str] = set()  # Set of filenames yang sudah pernah didownload
+        self.current_download_batch = []  # Track download batch saat ini
 
         # Create directories
         self.download_dir.mkdir(exist_ok=True)
         self.organized_dir.mkdir(exist_ok=True)
 
-        # Setup logging
+        # Setup logging FIRST (sebelum load database yang pakai log)
         self.log_stream = open(self.log_file, "a", encoding="utf-8")
+
+        # Load downloaded files database (ini pakai log, jadi harus setelah log_stream dibuat)
+        self.load_downloaded_files_db()
 
     def log(self, msg: str):
         """Log message to file"""
@@ -47,6 +53,40 @@ class DeviceScraper:
         self.log_stream.write(log_msg + "\n")
         self.log_stream.flush()
         print(log_msg)
+
+    def load_downloaded_files_db(self):
+        """Load database of downloaded files"""
+        if self.downloaded_files_db.exists():
+            try:
+                with open(self.downloaded_files_db, "r") as f:
+                    data = json.load(f)
+                    self.downloaded_files_set = set(data.get("files", []))
+                self.log(f"[+] Loaded {len(self.downloaded_files_set)} previously downloaded files")
+            except Exception as e:
+                self.log(f"[-] Error loading downloaded files DB: {str(e)}")
+                self.downloaded_files_set = set()
+        else:
+            self.log("[*] No previous download history found")
+
+    def save_downloaded_files_db(self):
+        """Save database of downloaded files"""
+        try:
+            with open(self.downloaded_files_db, "w") as f:
+                json.dump({"files": list(self.downloaded_files_set)}, f, indent=2)
+            self.log(f"[+] Saved {len(self.downloaded_files_set)} files to download DB")
+        except Exception as e:
+            self.log(f"[-] Error saving downloaded files DB: {str(e)}")
+
+    def is_file_downloaded(self, filename: str) -> bool:
+        """Check if file has been downloaded before"""
+        return filename in self.downloaded_files_set
+
+    def mark_file_downloaded(self, filename: str):
+        """Mark file as downloaded"""
+        self.downloaded_files_set.add(filename)
+        # Auto-save setiap 10 file
+        if len(self.downloaded_files_set) % 10 == 0:
+            self.save_downloaded_files_db()
 
     async def save_cookies(self):
         """Save browser cookies to file"""
@@ -90,6 +130,86 @@ class DeviceScraper:
             return True
         return False
 
+    async def check_session(self) -> bool:
+        """Check if session is still valid"""
+        try:
+            # Check jika masih di halaman login
+            current_url = self.page.url
+            if "login" in current_url:
+                self.log("[-] Session expired - redirected to login")
+                return False
+
+            # Check jika user logo masih ada
+            try:
+                await self.page.wait_for_selector("#main_user_logo", timeout=3000)
+                self.log("[+] Session still valid")
+                return True
+            except PlaywrightTimeout:
+                self.log("[-] Session invalid - user logo not found")
+                return False
+
+        except Exception as e:
+            self.log(f"[-] Error checking session: {str(e)}")
+            return False
+
+    async def re_login_and_resume(self, channel_value: int, page_num: int, start_date: str, end_date: str) -> bool:
+        """Re-login and resume to specific channel and page"""
+        try:
+            self.log(f"[*] Re-login and resume to channel {channel_value}, page {page_num}")
+
+            # Login
+            if not await self.login("scrapper", "sc@10001"):
+                self.log("[-] Re-login failed")
+                return False
+
+            self.log("[+] Re-login successful")
+            await asyncio.sleep(1)
+
+            # Navigate to playback menu
+            await self.click_xpath('//*[@id="main_playback"]')
+            await asyncio.sleep(1.5)
+            await self.click_xpath('//*[@id="playback_new_download"]')
+            self.log("[*] Navigated to playback menu")
+            await asyncio.sleep(1.5)
+
+            # Select channel
+            if not await self.select_channel(channel_value):
+                self.log(f"[-] Failed to re-select channel {channel_value}")
+                return False
+
+            # Set date range
+            if not await self.set_date_range(start_date, end_date):
+                self.log("[-] Failed to re-set date range")
+                return False
+
+            # Query playback
+            if not await self.query_playback():
+                self.log("[-] Failed to re-query playback")
+                return False
+
+            # Navigate to page if not page 1
+            if page_num > 1:
+                self.log(f"[*] Navigating back to page {page_num}...")
+                await self.page.evaluate(
+                    f"""(targetPage) => {{
+                    const input = document.getElementById('playback_jump_page');
+                    const btn = document.getElementById('playback_jump');
+                    if (input && btn) {{
+                        input.value = targetPage;
+                        btn.click();
+                    }}
+                }}""",
+                    page_num,
+                )
+                await asyncio.sleep(2)
+
+            self.log(f"[+] Successfully resumed to channel {channel_value}, page {page_num}")
+            return True
+
+        except Exception as e:
+            self.log(f"[-] Error in re_login_and_resume: {str(e)}")
+            return False
+
     async def initialize(self):
         """Initialize browser and page"""
         self.log("[*] Launching browser...")
@@ -126,14 +246,22 @@ class DeviceScraper:
             filename = download.suggested_filename
             save_path = self.download_dir / filename
 
+            # Check if file already downloaded before (di DB)
+            if self.is_file_downloaded(filename):
+                self.log(f"[SKIP] File sudah pernah didownload sebelumnya: {filename}")
+                if download in self.pending_downloads:
+                    self.pending_downloads.remove(download)
+                await download.cancel()
+                return
+
             # Check if file already exists in organized directory
             if self.check_file_exists(filename):
-                self.log(f"[SKIP] File already exists: {filename}")
-                # Still mark as completed to track progress
+                self.log(f"[SKIP] File already exists in organized dir: {filename}")
+                # Mark as downloaded
+                self.mark_file_downloaded(filename)
                 if download in self.pending_downloads:
                     self.pending_downloads.remove(download)
                 self.completed_downloads.append(filename)
-                # Cancel the download
                 await download.cancel()
                 return
 
@@ -143,24 +271,36 @@ class DeviceScraper:
             # Save the download
             await download.save_as(str(save_path))
 
-            # Verify file exists
+            # Verify file exists and has size
             if save_path.exists():
                 file_size = save_path.stat().st_size
-                self.log(f"[+] File saved: {filename} ({file_size} bytes)")
+                if file_size > 0:
+                    self.log(f"[+] File saved: {filename} ({file_size} bytes)")
+
+                    # Mark as downloaded in DB
+                    self.mark_file_downloaded(filename)
+
+                    # Move to completed
+                    if download in self.pending_downloads:
+                        self.pending_downloads.remove(download)
+                    self.completed_downloads.append(filename)
+                    self.current_download_batch.append(filename)
+
+                    self.log(
+                        f"[+] Download completed: {filename} (Total session: {len(self.completed_downloads)})"
+                    )
+
+                    # Organize file immediately (real-time)
+                    await self._organize_single_file(filename)
+                else:
+                    self.log(f"[-] WARNING: File has 0 bytes: {save_path}")
+                    save_path.unlink()  # Delete empty file
+                    if download in self.pending_downloads:
+                        self.pending_downloads.remove(download)
             else:
                 self.log(f"[-] WARNING: File not found after save: {save_path}")
-
-            # Move to completed
-            if download in self.pending_downloads:
-                self.pending_downloads.remove(download)
-            self.completed_downloads.append(filename)
-
-            self.log(
-                f"[+] Download completed: {filename} (Total: {len(self.completed_downloads)})"
-            )
-
-            # Organize file immediately (real-time)
-            await self._organize_single_file(filename)
+                if download in self.pending_downloads:
+                    self.pending_downloads.remove(download)
 
         except Exception as e:
             self.log(
@@ -478,6 +618,10 @@ class DeviceScraper:
         """Start download process"""
         try:
             self.log("[*] Starting download...")
+
+            # Reset current batch tracking
+            self.current_download_batch = []
+
             await self.click_xpath('//*[@id="playback_start_download"]')
             await asyncio.sleep(1)
             self.log("[+] Download button clicked")
@@ -493,8 +637,9 @@ class DeviceScraper:
             start_time = asyncio.get_event_loop().time()
             timeout_sec = timeout_ms / 1000
 
-            # Reset download tracking for this batch
+            # Track initial state
             initial_download_count = len(self.completed_downloads)
+            batch_start_count = len(self.current_download_batch)
 
             # Wait initial delay
             await asyncio.sleep(2)
@@ -506,6 +651,12 @@ class DeviceScraper:
             result = {"success": 0, "failure": 0, "completed": False}
 
             while asyncio.get_event_loop().time() - start_time < timeout_sec:
+                # Check session masih valid
+                if not await self.check_session():
+                    self.log("[!] Session lost during download - aborting")
+                    result["completed"] = False
+                    return result
+
                 status = await self.page.evaluate("""() => {
                     const infoElem = document.getElementById('playback_down_info');
                     const stopBtn = document.getElementById('playback_down_stop');
@@ -540,32 +691,34 @@ class DeviceScraper:
                             f"[+] Download initiated: {success} success, {failure} failure"
                         )
 
-                        # Wait a bit more for actual file downloads to complete
+                        # Wait for actual file downloads to complete
                         self.log("[*] Waiting for files to finish downloading...")
                         for wait_count in range(60):  # Wait up to 60 seconds
-                            current_downloads = (
-                                len(self.completed_downloads) - initial_download_count
-                            )
+                            current_batch_downloads = len(self.current_download_batch)
 
                             if (
-                                current_downloads >= expected_files
+                                current_batch_downloads >= expected_files
                                 and len(self.pending_downloads) == 0
                             ):
                                 self.log(
-                                    f"[+] All {current_downloads} files downloaded successfully"
+                                    f"[+] All {current_batch_downloads} files downloaded successfully"
                                 )
+                                # Save DB setelah batch selesai
+                                self.save_downloaded_files_db()
                                 return result
 
                             if wait_count % 5 == 0:  # Log every 5 seconds
                                 self.log(
-                                    f"[*] Downloaded {current_downloads}/{expected_files} files, {len(self.pending_downloads)} pending"
+                                    f"[*] Downloaded {current_batch_downloads}/{expected_files} files, {len(self.pending_downloads)} pending"
                                 )
 
                             await asyncio.sleep(1)
 
                         self.log(
-                            f"[+] Download completed with {len(self.completed_downloads) - initial_download_count} files"
+                            f"[+] Download completed with {len(self.current_download_batch)} files"
                         )
+                        # Save DB
+                        self.save_downloaded_files_db()
                         return result
 
                 # Check progress text
@@ -624,30 +777,31 @@ class DeviceScraper:
                             # Now wait for actual downloads
                             self.log("[*] Waiting for actual file downloads...")
                             for wait_count in range(120):  # Wait up to 2 minutes
-                                current_downloads = (
-                                    len(self.completed_downloads)
-                                    - initial_download_count
-                                )
+                                current_batch_downloads = len(self.current_download_batch)
 
                                 if (
-                                    current_downloads >= expected_files
+                                    current_batch_downloads >= expected_files
                                     and len(self.pending_downloads) == 0
                                 ):
                                     self.log(
-                                        f"[+] All {current_downloads} files downloaded successfully"
+                                        f"[+] All {current_batch_downloads} files downloaded successfully"
                                     )
+                                    # Save DB
+                                    self.save_downloaded_files_db()
                                     return result
 
                                 if wait_count % 10 == 0:  # Log every 10 seconds
                                     self.log(
-                                        f"[*] Downloaded {current_downloads}/{expected_files} files, {len(self.pending_downloads)} pending"
+                                        f"[*] Downloaded {current_batch_downloads}/{expected_files} files, {len(self.pending_downloads)} pending"
                                     )
 
                                 await asyncio.sleep(1)
 
                             self.log(
-                                f"[+] Download finished with {len(self.completed_downloads) - initial_download_count} files"
+                                f"[+] Download finished with {len(self.current_download_batch)} files"
                             )
+                            # Save DB
+                            self.save_downloaded_files_db()
                             return result
 
                     # Check for stalled progress
@@ -661,6 +815,8 @@ class DeviceScraper:
                     ):
                         self.log("[!] Download progress unchanged for 60s, completing")
                         result["completed"] = True
+                        # Save DB
+                        self.save_downloaded_files_db()
                         return result
 
                 # Check if stop button disappeared
@@ -669,19 +825,28 @@ class DeviceScraper:
                     # Still wait a bit for downloads
                     await asyncio.sleep(5)
                     result["completed"] = True
+                    # Save DB
+                    self.save_downloaded_files_db()
                     return result
 
                 await asyncio.sleep(2)
 
             self.log("[-] Download timeout")
             result["completed"] = False
+            # Save DB even on timeout
+            self.save_downloaded_files_db()
             return result
         except Exception as error:
             self.log(f"[-] Error waiting for download completion: {str(error)}")
+            # Save DB on error
+            self.save_downloaded_files_db()
             return {"success": 0, "failure": 0, "completed": False}
 
     async def close(self):
         """Close browser and cleanup"""
+        # Final save of download DB
+        self.save_downloaded_files_db()
+
         if self.browser:
             await self.browser.close()
             self.log("[+] Browser closed")
@@ -695,6 +860,7 @@ class DeviceScraper:
         return {
             "completed": len(self.completed_downloads),
             "pending": len(self.pending_downloads),
+            "total_ever": len(self.downloaded_files_set),
             "files": self.completed_downloads,
         }
 
@@ -723,16 +889,10 @@ class DeviceScraper:
             start_minute = full_match.group(6)
             start_second = full_match.group(7)
 
-            # End time
-            end_hour = full_match.group(11)
-            end_minute = full_match.group(12)
-            end_second = full_match.group(13)
-
             # Expected organized filename
             date_str = f"{start_year}-{start_month}-{start_day}"
             start_formatted = f"{start_hour}-{start_minute}-{start_second}"
-            end_formatted = f"{end_hour}-{end_minute}-{end_second}"
-            expected_filename = f"{date_str}.{start_formatted}_{end_formatted}.mp4"
+            expected_filename = f"{date_str}.{start_formatted}.mp4"
 
             # Check if file exists in organized directory
             channel_folder = self.organized_dir / f"channel{channel_num}"
@@ -742,22 +902,6 @@ class DeviceScraper:
 
         except Exception as e:
             return False
-
-    def debug_download_dir(self):
-        """Debug: list all files in download directory"""
-        try:
-            self.log(f"\n[DEBUG] Listing download directory: {self.download_dir}")
-            all_files = list(self.download_dir.iterdir())
-            self.log(f"[DEBUG] Total items in directory: {len(all_files)}")
-
-            for item in all_files[:20]:  # Show first 20 items
-                if item.is_file():
-                    size = item.stat().st_size
-                    self.log(f"[DEBUG]   FILE: {item.name} ({size} bytes)")
-                elif item.is_dir():
-                    self.log(f"[DEBUG]   DIR:  {item.name}/")
-        except Exception as e:
-            self.log(f"[-] Error listing directory: {str(e)}")
 
 
 async def download_playback(scraper: DeviceScraper):
@@ -772,7 +916,6 @@ async def download_playback(scraper: DeviceScraper):
             return
 
         # Filter active channels [1] through [21]
-        # Channel 1 sampai 21
         active_channels = []
         for ch in channels:
             match = re.match(r"^\[(\d+)\]", ch["label"])
@@ -797,41 +940,56 @@ async def download_playback(scraper: DeviceScraper):
         for channel in active_channels:
             scraper.log(f"\n[*] Memproses channel: {channel['label']}")
 
-            if not await scraper.select_channel(channel["value"]):
-                scraper.log(f"[-] Failed to select channel {channel['label']}")
-                continue
+            # Check session sebelum mulai channel baru
+            if not await scraper.check_session():
+                scraper.log("[!] Session lost before channel - re-logging in")
+                if not await scraper.re_login_and_resume(channel["value"], 1, start_date, end_date):
+                    scraper.log("[-] Failed to resume, skipping channel")
+                    continue
+            else:
+                # Session OK, select channel normally
+                if not await scraper.select_channel(channel["value"]):
+                    scraper.log(f"[-] Failed to select channel {channel['label']}")
+                    continue
 
-            if not await scraper.set_date_range(start_date, end_date):
-                scraper.log(
-                    f"[-] Failed to set date range untuk channel {channel['label']}"
-                )
-                continue
+                if not await scraper.set_date_range(start_date, end_date):
+                    scraper.log(
+                        f"[-] Failed to set date range untuk channel {channel['label']}"
+                    )
+                    continue
 
-            if not await scraper.query_playback():
-                scraper.log(
-                    f"[-] Failed to query playback untuk channel {channel['label']}"
-                )
-                continue
+                if not await scraper.query_playback():
+                    scraper.log(
+                        f"[-] Failed to query playback untuk channel {channel['label']}"
+                    )
+                    continue
 
             # Get pagination info
             page_info = await scraper.get_pagination_info()
-            all_table_data = []
 
-            for page in range(1, page_info["total"] + 1): #Page loop
-                if page > 1:
-                    scraper.log(f"[*] Navigasi ke halaman {page}...")
-                    await scraper.page.evaluate(
-                        f"""(targetPage) => {{
-                        const input = document.getElementById('playback_jump_page');
-                        const btn = document.getElementById('playback_jump');
-                        if (input && btn) {{
-                            input.value = targetPage;
-                            btn.click();
-                        }}
-                    }}""",
-                        page,
-                    )
-                    await asyncio.sleep(2)
+            for page in range(1, page_info["total"] + 1):
+                # Check session sebelum setiap page
+                if not await scraper.check_session():
+                    scraper.log(f"[!] Session lost at page {page} - re-logging in")
+                    if not await scraper.re_login_and_resume(channel["value"], page, start_date, end_date):
+                        scraper.log(f"[-] Failed to resume to page {page}, skipping rest of channel")
+                        break
+                else:
+                    # Session OK, navigate page normally (if not page 1)
+                    if page > 1:
+                        scraper.log(f"[*] Navigasi ke halaman {page}...")
+                        await scraper.page.evaluate(
+                            f"""(targetPage) => {{
+                            const input = document.getElementById('playback_jump_page');
+                            const btn = document.getElementById('playback_jump');
+                            if (input && btn) {{
+                                input.value = targetPage;
+                                btn.click();
+                            }}
+                        }}""",
+                            page,
+                        )
+                        await asyncio.sleep(2)
 
                 # Extract table data
                 table_data = await scraper.extract_table_data()
@@ -856,11 +1014,17 @@ async def download_playback(scraper: DeviceScraper):
                 retry_count = 0
 
                 while retry_count < max_retries:
+                    # Check session sebelum retry
+                    if not await scraper.check_session():
+                        scraper.log(f"[!] Session lost during page {page} processing - re-logging in")
+                        if not await scraper.re_login_and_resume(channel["value"], page, start_date, end_date):
+                            scraper.log(f"[-] Failed to resume, aborting page {page}")
+                            break
+
                     if retry_count > 0:
                         scraper.log(
                             f"\n[RETRY] Attempt {retry_count + 1}/{max_retries} for page {page}"
                         )
-                        # Re-select all files for retry
                         await asyncio.sleep(2)
 
                     # Select all and download
@@ -906,15 +1070,11 @@ async def download_playback(scraper: DeviceScraper):
                         )
                         break
 
-                # Merge table data (for reference)
-                all_table_data.extend(table_data)
-
                 # Files are already organized in real-time by _handle_download
-                # Just log summary
                 stats = scraper.get_download_stats()
-                scraper.log(f"[*] Total files downloaded so far: {stats['completed']}")
+                scraper.log(f"[*] Stats - Session: {stats['completed']}, Total ever: {stats['total_ever']}")
 
-        scraper.log(f"\n[+] Channel {channel['label']} selesai")
+            scraper.log(f"\n[+] Channel {channel['label']} selesai")
 
         scraper.log("\n[+] Download flow untuk semua channel selesai")
     except Exception as error:
