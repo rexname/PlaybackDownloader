@@ -167,43 +167,48 @@ class DeviceScraper:
             if not filename.endswith(".mp4"):
                 return
 
-            # Parse filename: 192.168.88.19_1_20250129143000_20250129144500.mp4
-            match = re.search(
-                r"\d+\.\d+\.\d+\.\d+_(\d+)_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})",
+            # Parse filename: 192.168.88.19_1_20250129004231_20250129004252.mp4
+            # Format: IP_CHANNEL_STARTTIME_ENDTIME.mp4
+            # Time format: YYYYMMDDHHmmss
+            full_match = re.search(
+                r"\d+\.\d+\.\d+\.\d+_(\d+)_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.mp4$",
                 filename,
             )
 
-            if not match:
+            if not full_match:
                 self.log(f"[-] Could not parse filename: {filename}")
                 return
 
-            channel_num = int(match.group(1))
-            year = match.group(2)
-            month = match.group(3)
-            day = match.group(4)
-            hour = match.group(5)
-            minute = match.group(6)
-            second = match.group(7)
+            # Extract components
+            channel_num = int(full_match.group(1))
 
-            date_str = f"{year}-{month}-{day}"
+            # Start time
+            start_year = full_match.group(2)
+            start_month = full_match.group(3)
+            start_day = full_match.group(4)
+            start_hour = full_match.group(5)
+            start_minute = full_match.group(6)
+            start_second = full_match.group(7)
 
-            # Extract end time from filename if available
-            end_match = re.search(
-                r"_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.mp4$", filename
-            )
-            end_hms = "00-00-00"
-            if end_match:
-                end_hms = (
-                    f"{end_match.group(4)}-{end_match.group(5)}-{end_match.group(6)}"
-                )
+            # End time
+            end_year = full_match.group(8)
+            end_month = full_match.group(9)
+            end_day = full_match.group(10)
+            end_hour = full_match.group(11)
+            end_minute = full_match.group(12)
+            end_second = full_match.group(13)
+
+            # Format components
+            date_str = f"{start_year}-{start_month}-{start_day}"
+            start_formatted = f"{start_hour}-{start_minute}-{start_second}"
+            end_formatted = f"{end_hour}-{end_minute}-{end_second}"
 
             # Create channel folder
             channel_folder = self.organized_dir / f"channel{channel_num}"
             channel_folder.mkdir(exist_ok=True)
 
             # Generate new filename
-            start_formatted = f"{hour}-{minute}-{second}"
-            new_filename = f"{date_str}.{start_formatted}_{end_hms}.mp4"
+            new_filename = f"{date_str}.{start_formatted}_{end_formatted}.mp4"
 
             old_path = self.download_dir / filename
             new_path = channel_folder / new_filename
@@ -219,6 +224,9 @@ class DeviceScraper:
 
         except Exception as e:
             self.log(f"[-] Error organizing {filename}: {str(e)}")
+            import traceback
+
+            self.log(f"[-] Traceback: {traceback.format_exc()}")
 
     async def login(
         self, username: str = "scrapper", password: str = "sc@10001"
@@ -805,6 +813,7 @@ async def download_playback(scraper: DeviceScraper):
                     )
 
         scraper.log(f"\n[+] Channel {channel['label']} selesai")
+
         scraper.log("\n[+] Download flow untuk semua channel selesai")
     except Exception as error:
         scraper.log(f"[-] Error in DownloadPlayback: {str(error)}")

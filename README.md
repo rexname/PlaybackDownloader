@@ -89,12 +89,24 @@ File yang diunduh akan diorganisir dengan format:
 
 ```
 YYYY-MM-DD.HH-MM-SS_HH-MM-SS.mp4
+└─Tanggal  └─Waktu    └─Waktu
+           Mulai      Selesai
 ```
 
-Contoh: `2025-01-29.14-30-00_14-45-00.mp4`
-- Tanggal: 2025-01-29
-- Waktu mulai: 14:30:00
-- Waktu selesai: 14:45:00
+**Contoh:** `2026-01-29.00-42-31_00-45-52.mp4`
+- **Tanggal:** 2026-01-29 (29 Januari 2026)
+- **Waktu mulai:** 00:42:31 (Jam 00:42:31 atau 12:42:31 AM)
+- **Waktu selesai:** 00:45:52 (Jam 00:45:52 atau 12:45:52 AM)
+- **Durasi:** ~3 menit 21 detik
+
+**Cara Baca File Anda:**
+```bash
+2026-01-29.00-42-31_00-45-52.mp4
+```
+- Rekaman tanggal **29 Januari 2026**
+- Dimulai jam **00:42:31** (tengah malam lewat 42 menit)
+- Selesai jam **00:45:52** (tengah malam lewat 45 menit)
+- Durasi rekaman sekitar **3 menit**
 
 ## Troubleshooting
 
