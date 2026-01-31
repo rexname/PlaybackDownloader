@@ -28,13 +28,21 @@ class DeviceScraper:
         self.download_dir = self.script_dir / "downloads"
         self.organized_dir = self.download_dir / "cctv"
         self.log_file = self.download_dir / "log.txt"
-        self.downloaded_files_db = self.script_dir / "downloaded_files.json"
+
+        # Database file - akan di-set sesuai tanggal target download
+        self.downloaded_files_db = None
+        self.current_download_date = None
 
         # Download tracking
         self.pending_downloads = []
         self.completed_downloads = []
-        self.downloaded_files_set: Set[str] = set()  # Set of filenames yang sudah pernah didownload
+        # Structure: {"channels": {"1": {"pages": {"1": ["file1.mp4", "file2.mp4"]}}}}
+        self.downloaded_files_db_data: Dict = {"channels": {}}
         self.current_download_batch = []  # Track download batch saat ini
+
+        # Context tracking - untuk tahu file download dari channel/page mana
+        self.current_channel = None
+        self.current_page = None
 
         # Create directories
         self.download_dir.mkdir(exist_ok=True)
@@ -42,9 +50,6 @@ class DeviceScraper:
 
         # Setup logging FIRST (sebelum load database yang pakai log)
         self.log_stream = open(self.log_file, "a", encoding="utf-8")
-
-        # Load downloaded files database (ini pakai log, jadi harus setelah log_stream dibuat)
-        self.load_downloaded_files_db()
 
     def log(self, msg: str):
         """Log message to file"""
@@ -54,37 +59,144 @@ class DeviceScraper:
         self.log_stream.flush()
         print(log_msg)
 
+    def set_download_date(self, date_str: str):
+        """Set tanggal download dan initialize database file
+        Args:
+            date_str: Format YYYY-MM-DD (misal: 2026-01-30)
+        """
+        try:
+            # Parse tanggal
+            date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+            # Format ke DD-MM-YYYY untuk nama file
+            formatted_date = date_obj.strftime("%d-%m-%Y")
+
+            self.current_download_date = date_str
+            self.downloaded_files_db = self.script_dir / f"files_{formatted_date}.json"
+
+            self.log(f"[+] Database file set to: {self.downloaded_files_db.name}")
+
+            # Load database untuk tanggal ini
+            self.load_downloaded_files_db()
+
+        except Exception as e:
+            self.log(f"[-] Error setting download date: {str(e)}")
+
     def load_downloaded_files_db(self):
         """Load database of downloaded files"""
+        if not self.downloaded_files_db:
+            self.log("[*] Database file not set yet")
+            return
+
         if self.downloaded_files_db.exists():
             try:
                 with open(self.downloaded_files_db, "r") as f:
-                    data = json.load(f)
-                    self.downloaded_files_set = set(data.get("files", []))
-                self.log(f"[+] Loaded {len(self.downloaded_files_set)} previously downloaded files")
+                    self.downloaded_files_db_data = json.load(f)
+
+                # Ensure structure exists
+                if "channels" not in self.downloaded_files_db_data:
+                    self.downloaded_files_db_data = {"channels": {}}
+
+                # Count total files
+                total_files = 0
+                for channel_data in self.downloaded_files_db_data["channels"].values():
+                    for page_files in channel_data.get("pages", {}).values():
+                        total_files += len(page_files)
+
+                self.log(f"[+] Loaded database: {total_files} files across all channels/pages")
             except Exception as e:
-                self.log(f"[-] Error loading downloaded files DB: {str(e)}")
-                self.downloaded_files_set = set()
+                self.log(f"[-] Error loading database: {str(e)}")
+                self.downloaded_files_db_data = {"channels": {}}
         else:
-            self.log("[*] No previous download history found")
+            self.log(f"[*] No previous database found for this date")
+            self.downloaded_files_db_data = {"channels": {}}
 
     def save_downloaded_files_db(self):
         """Save database of downloaded files"""
+        if not self.downloaded_files_db:
+            self.log("[!] Cannot save - database file not set")
+            return
+
         try:
             with open(self.downloaded_files_db, "w") as f:
-                json.dump({"files": list(self.downloaded_files_set)}, f, indent=2)
-            self.log(f"[+] Saved {len(self.downloaded_files_set)} files to download DB")
+                json.dump(self.downloaded_files_db_data, f, indent=2)
+
+            # Count total
+            total_files = 0
+            for channel_data in self.downloaded_files_db_data["channels"].values():
+                for page_files in channel_data.get("pages", {}).values():
+                    total_files += len(page_files)
+
+            self.log(f"[+] Saved database: {total_files} files")
         except Exception as e:
-            self.log(f"[-] Error saving downloaded files DB: {str(e)}")
+            self.log(f"[-] Error saving database: {str(e)}")
 
-    def is_file_downloaded(self, filename: str) -> bool:
-        """Check if file has been downloaded before"""
-        return filename in self.downloaded_files_set
+    def is_file_downloaded(self, channel: int, page: int, filename: str) -> bool:
+        """Check if file sudah pernah didownload
+        Args:
+            channel: Channel number (0-based index atau channel value)
+            page: Page number
+            filename: Nama file
+        """
+        channel_key = str(channel)
+        page_key = str(page)
 
-    def mark_file_downloaded(self, filename: str):
-        """Mark file as downloaded"""
-        self.downloaded_files_set.add(filename)
-        # Auto-save setiap 10 file
+        if channel_key not in self.downloaded_files_db_data["channels"]:
+            return False
+
+        channel_data = self.downloaded_files_db_data["channels"][channel_key]
+
+        if "pages" not in channel_data:
+            return False
+
+        if page_key not in channel_data["pages"]:
+            return False
+
+        return filename in channel_data["pages"][page_key]
+
+    def mark_file_downloaded(self, channel: int, page: int, filename: str):
+        """Mark file sebagai downloaded
+        Args:
+            channel: Channel number
+            page: Page number
+            filename: Nama file
+        """
+        channel_key = str(channel)
+        page_key = str(page)
+
+        # Ensure structure exists
+        if channel_key not in self.downloaded_files_db_data["channels"]:
+            self.downloaded_files_db_data["channels"][channel_key] = {"pages": {}}
+
+        channel_data = self.downloaded_files_db_data["channels"][channel_key]
+
+        if "pages" not in channel_data:
+            channel_data["pages"] = {}
+
+        if page_key not in channel_data["pages"]:
+            channel_data["pages"][page_key] = []
+
+        # Add filename jika belum ada
+        if filename not in channel_data["pages"][page_key]:
+            channel_data["pages"][page_key].append(filename)
+
+    def get_page_stats(self, channel: int, page: int) -> dict:
+        """Get statistik download untuk page tertentu
+        Returns:
+            dict dengan keys: downloaded_count, files (list of filenames)
+        """
+        channel_key = str(channel)
+        page_key = str(page)
+
+        if channel_key not in self.downloaded_files_db_data["channels"]:
+            return {"downloaded_count": 0, "files": []}
+
+        channel_data = self.downloaded_files_db_data["channels"][channel_key]
+
+        if "pages" not in channel_data or page_key not in channel_data["pages"]:
+            return {"downloaded_count": 0, "files": []}
+
+        files = channel_data["pages"][page_key]
+        return {"downloaded_count": len(files), "files": files}
         if len(self.downloaded_files_set) % 10 == 0:
             self.save_downloaded_files_db()
 
@@ -256,19 +368,21 @@ class DeviceScraper:
             filename = download.suggested_filename
             save_path = self.download_dir / filename
 
-            # Check if file already downloaded before (di DB)
-            if self.is_file_downloaded(filename):
-                self.log(f"[SKIP] File sudah pernah didownload sebelumnya: {filename}")
-                if download in self.pending_downloads:
-                    self.pending_downloads.remove(download)
-                await download.cancel()
-                return
+            # Check if file already downloaded before (di DB) untuk channel/page ini
+            if self.current_channel is not None and self.current_page is not None:
+                if self.is_file_downloaded(self.current_channel, self.current_page, filename):
+                    self.log(f"[SKIP] Already in DB - Ch{self.current_channel} P{self.current_page}: {filename}")
+                    if download in self.pending_downloads:
+                        self.pending_downloads.remove(download)
+                    await download.cancel()
+                    return
 
             # Check if file already exists in organized directory
             if self.check_file_exists(filename):
-                self.log(f"[SKIP] File already exists in organized dir: {filename}")
-                # Mark as downloaded
-                self.mark_file_downloaded(filename)
+                self.log(f"[SKIP] File exists in organized dir: {filename}")
+                # Mark as downloaded in DB
+                if self.current_channel is not None and self.current_page is not None:
+                    self.mark_file_downloaded(self.current_channel, self.current_page, filename)
                 if download in self.pending_downloads:
                     self.pending_downloads.remove(download)
                 self.completed_downloads.append(filename)
@@ -287,8 +401,9 @@ class DeviceScraper:
                 if file_size > 0:
                     self.log(f"[+] File saved: {filename} ({file_size} bytes)")
 
-                    # Mark as downloaded in DB
-                    self.mark_file_downloaded(filename)
+                    # Mark as downloaded in DB with channel/page context
+                    if self.current_channel is not None and self.current_page is not None:
+                        self.mark_file_downloaded(self.current_channel, self.current_page, filename)
 
                     # Move to completed
                     if download in self.pending_downloads:
@@ -621,6 +736,31 @@ class DeviceScraper:
             self.log(f"[-] Error getting pagination info: {str(error)}")
             return {"current": 1, "total": 1}
 
+    async def get_failed_file_indices(self) -> List[int]:
+        """Get indices of files that are still checked (failed files remain checked)"""
+        try:
+            indices = await self.page.evaluate("""() => {
+                const rows = Array.from(
+                    document.querySelectorAll('div.td-table-body div.td-table-row')
+                );
+                const failedIndices = [];
+                rows.forEach((row, index) => {
+                    const checkbox = row.querySelector('input.checkbox');
+                    if (checkbox && checkbox.checked) {
+                        failedIndices.push(index);
+                    }
+                });
+                return failedIndices;
+            }""")
+
+            if len(indices) > 0:
+                self.log(f"[*] Found {len(indices)} files still selected (likely failed): {indices}")
+
+            return indices
+        except Exception as error:
+            self.log(f"[-] Error getting failed file indices: {str(error)}")
+            return []
+
     async def select_all_files(self) -> bool:
         """Select all files on current page"""
         try:
@@ -644,6 +784,39 @@ class DeviceScraper:
             return True
         except Exception as error:
             self.log(f"[-] Error selecting all files: {str(error)}")
+            return False
+
+    async def select_specific_files(self, indices: List[int]) -> bool:
+        """Select only specific files by their indices"""
+        try:
+            if not indices:
+                self.log("[-] No indices provided")
+                return False
+
+            self.log(f"[*] Selecting {len(indices)} specific files: {indices}")
+
+            selected = await self.page.evaluate("""(indices) => {
+                const rows = Array.from(
+                    document.querySelectorAll('div.td-table-body div.td-table-row')
+                );
+                let count = 0;
+                indices.forEach(index => {
+                    if (index < rows.length) {
+                        const checkbox = rows[index].querySelector('input.checkbox');
+                        if (checkbox && !checkbox.checked) {
+                            checkbox.click();
+                            count++;
+                        }
+                    }
+                });
+                return count;
+            }""", indices)
+
+            await asyncio.sleep(0.5)
+            self.log(f"[+] Selected {selected} files")
+            return selected > 0
+        except Exception as error:
+            self.log(f"[-] Error selecting specific files: {str(error)}")
             return False
 
     async def start_download(self) -> bool:
@@ -889,10 +1062,16 @@ class DeviceScraper:
 
     def get_download_stats(self):
         """Get current download statistics"""
+        # Count total files in database
+        total_in_db = 0
+        for channel_data in self.downloaded_files_db_data["channels"].values():
+            for page_files in channel_data.get("pages", {}).values():
+                total_in_db += len(page_files)
+
         return {
             "completed": len(self.completed_downloads),
             "pending": len(self.pending_downloads),
-            "total_ever": len(self.downloaded_files_set),
+            "total_ever": total_in_db,
             "files": self.completed_downloads,
         }
 
@@ -968,9 +1147,15 @@ async def download_playback(scraper: DeviceScraper):
         start_date = f"{date_str} 00:00:00"
         end_date = f"{date_str} 23:59:59"
 
+        # Set download date untuk database file
+        scraper.set_download_date(date_str)
+
         # Loop through all active channels
         for channel in active_channels:
             scraper.log(f"\n[*] Memproses channel: {channel['label']}")
+
+            # Set current channel context
+            scraper.current_channel = channel["value"]
 
             # Check session sebelum mulai channel baru
             if not await scraper.check_session():
@@ -1000,6 +1185,16 @@ async def download_playback(scraper: DeviceScraper):
             page_info = await scraper.get_pagination_info()
 
             for page in range(1, page_info["total"] + 1):
+                # Set current page context
+                scraper.current_page = page
+
+                # Check statistik page ini
+                page_stats = scraper.get_page_stats(channel["value"], page)
+                if page_stats["downloaded_count"] > 0:
+                    scraper.log(
+                        f"[*] Page {page} - Already downloaded {page_stats['downloaded_count']} files before"
+                    )
+
                 # Check session sebelum setiap page
                 if not await scraper.check_session():
                     scraper.log(f"[!] Session lost at page {page} - re-logging in")
@@ -1055,9 +1250,12 @@ async def download_playback(scraper: DeviceScraper):
 
                     if retry_count > 0:
                         scraper.log(
-                            f"\n[RETRY] Attempt {retry_count + 1}/{max_retries} for page {page}"
+                            f"\n[RETRY {retry_count + 1}/{max_retries}] Page {page} - Re-downloading failed files"
                         )
-                        await asyncio.sleep(2)
+                        scraper.log("[*] System will auto-skip files already in database")
+                        # Delay lebih lama untuk retry (exponential backoff)
+                        retry_delay = 5 * (2 ** (retry_count - 1))  # 5s, 10s, 20s
+                        await asyncio.sleep(retry_delay)
 
                     # Select all and download
                     if retry_count == 0:
@@ -1088,7 +1286,7 @@ async def download_playback(scraper: DeviceScraper):
                         retry_count += 1
 
                         if retry_count < max_retries:
-                            scraper.log(f"[*] Will retry failed files...")
+                            scraper.log(f"[*] Will retry (attempt {retry_count + 1}/{max_retries})...")
                             continue
                         else:
                             scraper.log(
