@@ -777,7 +777,7 @@ class DeviceScraper:
         """Select all files on current page"""
         try:
             self.log("[*] Selecting all files on this page...")
-
+            asyncio.sleep(0.5)
             checkbox_clicked = await self.page.evaluate("""() => {
                 const checkbox = document.querySelector('div.td-table-header input.checkbox');
                 if (checkbox) {
