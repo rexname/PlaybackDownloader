@@ -1411,7 +1411,7 @@ async def download_playback(scraper: DeviceScraper):
                 scraper.log(f"[*] Stats - Session: {stats['completed']}, Total ever: {stats['total_ever']}")
 
                 # Pause sebelum lanjut ke page berikutnya
-                await asyncio.get_event_loop().run_in_executor(None, input, f"Tekan ENTER untuk lanjut ke page berikutnya (Channel: {channel['label']}, Page: {page})...")
+                # await asyncio.get_event_loop().run_in_executor(None, input, f"Tekan ENTER untuk lanjut ke page berikutnya (Channel: {channel['label']}, Page: {page})...")
 
             scraper.log(f"\n[+] Channel {channel['label']} selesai")
 
