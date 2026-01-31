@@ -798,38 +798,7 @@ class DeviceScraper:
             self.log(f"[-] Error selecting all files: {str(error)}")
             return False
 
-    async def select_specific_files(self, indices: List[int]) -> bool:
-        """Select only specific files by their indices"""
-        try:
-            if not indices:
-                self.log("[-] No indices provided")
-                return False
 
-            self.log(f"[*] Selecting {len(indices)} specific files: {indices}")
-
-            selected = await self.page.evaluate("""(indices) => {
-                const rows = Array.from(
-                    document.querySelectorAll('div.td-table-body div.td-table-row')
-                );
-                let count = 0;
-                indices.forEach(index => {
-                    if (index < rows.length) {
-                        const checkbox = rows[index].querySelector('input.checkbox');
-                        if (checkbox && !checkbox.checked) {
-                            checkbox.click();
-                            count++;
-                        }
-                    }
-                });
-                return count;
-            }""", indices)
-
-            await asyncio.sleep(0.5)
-            self.log(f"[+] Selected {selected} files")
-            return selected > 0
-        except Exception as error:
-            self.log(f"[-] Error selecting specific files: {str(error)}")
-            return False
 
     async def start_download(self) -> bool:
         """Start download process"""
@@ -873,6 +842,80 @@ class DeviceScraper:
                     self.log("[!] Session lost during download - aborting")
                     result["completed"] = False
                     return result
+
+                # Cek apakah tombol Stop Download disabled (indikator selesai)
+                stop_btn_disabled = await self.page.evaluate("""() => {
+                    const stopBtn = document.getElementById('playback_down_stop');
+                    return stopBtn && stopBtn.hasAttribute('disabled');
+                }""")
+                if stop_btn_disabled:
+                    self.log("[*] Tombol Stop Download disabled, proses download dianggap selesai. Cek notifikasi/toast...")
+                    # Tunggu sebentar untuk toast muncul
+                    await asyncio.sleep(1)
+                    toast_text = await self.page.evaluate("""() => {
+                        // Cek elemen toast/alert umum (contoh: element-plus/el-message)
+                        let toast = document.querySelector('.el-message__content');
+                        if (toast) return toast.textContent.trim();
+                        // Fallback ke showbox/info_ jika ada
+                        let showbox = document.getElementById('showbox');
+                        if (showbox && showbox.textContent.trim()) return showbox.textContent.trim();
+                        let info_ = document.getElementById('info_');
+                        if (info_ && info_.textContent.trim()) return info_.textContent.trim();
+                        return null;
+                    }""")
+                    if toast_text:
+                        self.log(f"[+] Notifikasi setelah tombol Stop Download disabled: {toast_text}")
+                        # Parse hasil download dari toast jika ada
+                        success_match = re.search(r"Success (\d+)", toast_text)
+                        failure_match = re.search(r"Failure (\d+)", toast_text)
+                        if success_match and failure_match:
+                            result["success"] = int(success_match.group(1))
+                            result["failure"] = int(failure_match.group(1))
+                        result["completed"] = True
+                        self.save_downloaded_files_db(force_log=True)
+                        return result
+                    else:
+                        self.log("[*] Tidak ada notifikasi/toast setelah tombol Stop Download disabled, anggap selesai")
+                        result["completed"] = True
+                        self.save_downloaded_files_db(force_log=True)
+                        return result
+
+                # Cek apakah dialog download masih ada
+                dialog_exists = await self.page.evaluate("""() => {
+                    const dialog = document.getElementById('playback_down_dialog');
+                    return !!(dialog && dialog.style.display !== 'none');
+                }""")
+                if not dialog_exists:
+                    self.log("[*] Download dialog hilang, cek notifikasi/toast...")
+                    # Tunggu sebentar untuk toast muncul
+                    await asyncio.sleep(1)
+                    toast_text = await self.page.evaluate("""() => {
+                        // Cek elemen toast/alert umum (contoh: element-plus/el-message)
+                        let toast = document.querySelector('.el-message__content');
+                        if (toast) return toast.textContent.trim();
+                        // Fallback ke showbox/info_ jika ada
+                        let showbox = document.getElementById('showbox');
+                        if (showbox && showbox.textContent.trim()) return showbox.textContent.trim();
+                        let info_ = document.getElementById('info_');
+                        if (info_ && info_.textContent.trim()) return info_.textContent.trim();
+                        return null;
+                    }""")
+                    if toast_text:
+                        self.log(f"[+] Notifikasi setelah dialog hilang: {toast_text}")
+                        # Parse hasil download dari toast jika ada
+                        success_match = re.search(r"Success (\d+)", toast_text)
+                        failure_match = re.search(r"Failure (\d+)", toast_text)
+                        if success_match and failure_match:
+                            result["success"] = int(success_match.group(1))
+                            result["failure"] = int(failure_match.group(1))
+                        result["completed"] = True
+                        self.save_downloaded_files_db(force_log=True)
+                        return result
+                    else:
+                        self.log("[*] Tidak ada notifikasi/toast setelah dialog hilang, anggap selesai")
+                        result["completed"] = True
+                        self.save_downloaded_files_db(force_log=True)
+                        return result
 
                 status = await self.page.evaluate("""() => {
                     const infoElem = document.getElementById('playback_down_info');
