@@ -777,23 +777,31 @@ class DeviceScraper:
         """Select all files on current page"""
         try:
             self.log("[*] Selecting all files on this page...")
-            asyncio.sleep(0.5)
-            checkbox_clicked = await self.page.evaluate("""() => {
-                const checkbox = document.querySelector('div.td-table-header input.checkbox');
-                if (checkbox) {
-                    checkbox.click();
-                    return true;
-                }
-                return false;
-            }""")
-
-            if not checkbox_clicked:
-                self.log("[-] Checkbox not found")
-                return False
-
             await asyncio.sleep(0.5)
-            self.log("[+] All files selected")
-            return True
+            # Coba klik sampai checked (maks 3x)
+            for attempt in range(3):
+                checkbox_status = await self.page.evaluate("""() => {
+                    const checkbox = document.querySelector('div.td-table-header input.checkbox');
+                    if (!checkbox) return {found: false, checked: false};
+                    checkbox.click();
+                    return {found: true, checked: checkbox.checked};
+                }""")
+                if not checkbox_status["found"]:
+                    self.log("[-] Checkbox not found")
+                    return False
+                # Verifikasi semua checkbox body checked
+                all_checked = await self.page.evaluate("""
+                () => {
+                    const checkboxes = document.querySelectorAll('div.td-table-body input.checkbox');
+                    return Array.from(checkboxes).length > 0 && Array.from(checkboxes).every(cb => cb.checked);
+                }
+                """)
+                if checkbox_status["checked"] and all_checked:
+                    self.log("[+] All files selected (verified)")
+                    return True
+                await asyncio.sleep(0.5)
+            self.log("[-] Failed to check select-all checkbox after retries or not all body checkboxes checked")
+            return False
         except Exception as error:
             self.log(f"[-] Error selecting all files: {str(error)}")
             return False
@@ -1317,6 +1325,13 @@ async def download_playback(scraper: DeviceScraper):
                 max_retries = 3
                 retry_count = 0
 
+                # Hitung file yang benar-benar perlu di-download
+                files_to_download = total_files_in_page - already_downloaded_in_page
+
+                if files_to_download == 0:
+                    scraper.log(f"[✓] Semua file di halaman {page} sudah ada di database, tidak perlu download atau retry.")
+                    continue
+
                 while retry_count < max_retries:
                     # Check session sebelum retry
                     if not await scraper.check_session():
@@ -1355,31 +1370,48 @@ async def download_playback(scraper: DeviceScraper):
                         )
                         break
 
-                    # Check if there are failures
-                    if download_result["failure"] > 0:
-                        scraper.log(
-                            f"[!] Page {page} has {download_result['failure']} failed files"
-                        )
-                        retry_count += 1
+                    # Setelah download, cek ulang jumlah file yang sudah di database
+                    page_stats_after = scraper.get_page_stats(channel["value"], page)
+                    downloaded_now = page_stats_after["downloaded_count"] - already_downloaded_in_page
 
-                        if retry_count < max_retries:
-                            scraper.log(f"[*] Will retry (attempt {retry_count + 1}/{max_retries})...")
-                            continue
-                        else:
-                            scraper.log(
-                                f"[!] Max retries reached, skipping remaining failures"
-                            )
-                            break
-                    else:
-                        # All files succeeded
+                    # Hitung ulang file yang masih perlu di-download
+                    files_still_needed = total_files_in_page - page_stats_after["downloaded_count"]
+
+                    # Jika sudah tidak ada file yang perlu di-download, break retry
+                    if files_still_needed == 0:
                         scraper.log(
-                            f"[✓] Page {page} completed successfully - all {download_result['success']} files downloaded"
+                            f"[✓] Semua file di halaman {page} sudah di-download atau sudah ada di database setelah percobaan ini, lanjut ke page berikutnya"
+                        )
+                        break
+
+                    # Jika hasil success sama dengan file yang benar-benar baru, lanjut page
+                    if download_result["success"] >= downloaded_now:
+                        scraper.log(
+                            f"[✓] Semua file yang perlu di-download pada page {page} sudah berhasil diunduh"
+                        )
+                        break
+
+                    # Jika masih ada file yang belum di-download, retry jika masih ada kesempatan
+                    scraper.log(
+                        f"[!] Page {page} masih ada {files_still_needed} file yang belum di-download"
+                    )
+                    retry_count += 1
+
+                    if retry_count < max_retries:
+                        scraper.log(f"[*] Will retry (attempt {retry_count + 1}/{max_retries})...")
+                        continue
+                    else:
+                        scraper.log(
+                            f"[!] Max retries reached, skipping remaining failures"
                         )
                         break
 
                 # Files are already organized in real-time by _handle_download
                 stats = scraper.get_download_stats()
                 scraper.log(f"[*] Stats - Session: {stats['completed']}, Total ever: {stats['total_ever']}")
+
+                # Pause sebelum lanjut ke page berikutnya
+                await asyncio.get_event_loop().run_in_executor(None, input, f"Tekan ENTER untuk lanjut ke page berikutnya (Channel: {channel['label']}, Page: {page})...")
 
             scraper.log(f"\n[+] Channel {channel['label']} selesai")
 
