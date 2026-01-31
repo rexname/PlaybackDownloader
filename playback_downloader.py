@@ -157,35 +157,45 @@ class DeviceScraper:
         try:
             self.log(f"[*] Re-login and resume to channel {channel_value}, page {page_num}")
 
-            # Login
+            # Add delay before re-login attempt to avoid overwhelming server
+            await asyncio.sleep(3)
+
+            # Login with retry mechanism
             if not await self.login("scrapper", "sc@10001"):
-                self.log("[-] Re-login failed")
+                self.log("[-] Re-login failed after all retries")
                 return False
 
             self.log("[+] Re-login successful")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)  # Increased wait after login
 
             # Navigate to playback menu
+            self.log("[*] Navigating to playback menu...")
             await self.click_xpath('//*[@id="main_playback"]')
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2)  # Increased delay
             await self.click_xpath('//*[@id="playback_new_download"]')
-            self.log("[*] Navigated to playback menu")
-            await asyncio.sleep(1.5)
+            self.log("[+] Entered playback menu")
+            await asyncio.sleep(2)  # Increased delay
 
             # Select channel
             if not await self.select_channel(channel_value):
                 self.log(f"[-] Failed to re-select channel {channel_value}")
                 return False
 
+            await asyncio.sleep(1)
+
             # Set date range
             if not await self.set_date_range(start_date, end_date):
                 self.log("[-] Failed to re-set date range")
                 return False
 
+            await asyncio.sleep(1)
+
             # Query playback
             if not await self.query_playback():
                 self.log("[-] Failed to re-query playback")
                 return False
+
+            await asyncio.sleep(1)
 
             # Navigate to page if not page 1
             if page_num > 1:
@@ -201,7 +211,7 @@ class DeviceScraper:
                 }}""",
                     page_num,
                 )
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)  # Increased delay for page navigation
 
             self.log(f"[+] Successfully resumed to channel {channel_value}, page {page_num}")
             return True
@@ -216,7 +226,7 @@ class DeviceScraper:
 
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
-            headless=True,
+            headless=False,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -375,63 +385,85 @@ class DeviceScraper:
     async def login(
         self, username: str = "scrapper", password: str = "sc@10001"
     ) -> bool:
-        """Login to device"""
-        try:
-            login_url = f"{self.base_url}/"
+        """Login to device with retry mechanism"""
+        max_retries = 3
+        base_delay = 5  # Base delay in seconds
 
-            self.log(f"[*] Navigating to {login_url}")
-            await self.page.goto(login_url, timeout=30000)
-            await self.page.reload(wait_until="networkidle")
-
-            # Wait for login hash in URL
-            await self.page.wait_for_function(
-                "() => window.location.hash.includes('login')", timeout=15000
-            )
-            await asyncio.sleep(1)
-
-            self.log("[*] Waiting for login form...")
-            await self.page.wait_for_selector("#login_u", timeout=15000)
-            self.log("[+] Login form found")
-
-            self.log("[*] Pause 2 detik - tunggu form siap...")
-            await asyncio.sleep(2)
-
-            self.log(f"[*] Entering username: {username}")
-            await self.page.type("#login_u", username, delay=100)
-            await asyncio.sleep(0.2)
-
-            self.log(f"[*] Entering password: {'*' * len(password)}")
-            await self.page.click("#login_p")
-            await asyncio.sleep(0.5)
-            await self.page.type("#login_p", password, delay=100)
-            await asyncio.sleep(1)
-
-            self.log("[*] Clicking login button...")
-            await self.page.click("#login_s")
-
-            # Wait for redirect
-            self.log("[*] Waiting for redirect...")
-            await self.page.wait_for_function(
-                "() => !window.location.hash.includes('login')", timeout=10000
-            )
-            await asyncio.sleep(1)
-
-            current_url = self.page.url
-            self.log(f"[*] Current URL: {current_url}")
-
-            # Verify login
+        for attempt in range(max_retries):
             try:
-                await self.page.wait_for_selector("#main_user_logo", timeout=5000)
-                self.log("[+] Login berhasil!")
-                await asyncio.sleep(1.5)
-                return True
-            except PlaywrightTimeout:
-                self.log("[-] Login gagal - element login tidak ditemukan")
+                if attempt > 0:
+                    # Exponential backoff: 5s, 10s, 20s
+                    delay = base_delay * (2 ** attempt)
+                    self.log(f"[*] Retry attempt {attempt + 1}/{max_retries} after {delay}s delay...")
+                    await asyncio.sleep(delay)
+
+                login_url = f"{self.base_url}/"
+
+                self.log(f"[*] Navigating to {login_url}")
+                await self.page.goto(login_url, timeout=45000)
+                await self.page.reload(wait_until="networkidle")
+
+                # Wait for login hash in URL - increased timeout
+                await self.page.wait_for_function(
+                    "() => window.location.hash.includes('login')", timeout=30000
+                )
+                await asyncio.sleep(1)
+
+                self.log("[*] Waiting for login form...")
+                await self.page.wait_for_selector("#login_u", timeout=30000)
+                self.log("[+] Login form found")
+
+                self.log("[*] Pause 2 detik - tunggu form siap...")
+                await asyncio.sleep(2)
+
+                self.log(f"[*] Entering username: {username}")
+                await self.page.type("#login_u", username, delay=100)
+                await asyncio.sleep(0.2)
+
+                self.log(f"[*] Entering password: {'*' * len(password)}")
+                await self.page.click("#login_p")
+                await asyncio.sleep(0.5)
+                await self.page.type("#login_p", password, delay=100)
+                await asyncio.sleep(1)
+
+                self.log("[*] Clicking login button...")
+                await self.page.click("#login_s")
+
+                # Wait for redirect - increased timeout
+                self.log("[*] Waiting for redirect...")
+                await self.page.wait_for_function(
+                    "() => !window.location.hash.includes('login')", timeout=30000
+                )
+                await asyncio.sleep(1)
+
+                current_url = self.page.url
+                self.log(f"[*] Current URL: {current_url}")
+
+                # Verify login - increased timeout
+                try:
+                    await self.page.wait_for_selector("#main_user_logo", timeout=15000)
+                    self.log("[+] Login berhasil!")
+                    await asyncio.sleep(1.5)
+                    return True
+                except PlaywrightTimeout:
+                    self.log("[-] Login gagal - element login tidak ditemukan")
+                    if attempt < max_retries - 1:
+                        continue
+                    return False
+
+            except PlaywrightTimeout as timeout_error:
+                self.log(f"[-] Timeout error on attempt {attempt + 1}: {str(timeout_error)}")
+                if attempt < max_retries - 1:
+                    continue
+                return False
+            except Exception as error:
+                self.log(f"[-] Error on attempt {attempt + 1}: {str(error)}")
+                if attempt < max_retries - 1:
+                    continue
                 return False
 
-        except Exception as error:
-            self.log(f"[-] Error: {str(error)}")
-            return False
+        self.log(f"[-] Login failed after {max_retries} attempts")
+        return False
 
     async def click_xpath(self, xpath: str) -> bool:
         """Click element by XPath"""
