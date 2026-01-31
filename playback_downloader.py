@@ -346,7 +346,7 @@ class DeviceScraper:
 
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(
-            headless=False,
+            headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -382,6 +382,9 @@ class DeviceScraper:
                     self.log(f"[SKIP] Already in DB - Ch{self.current_channel} P{self.current_page}: {filename}")
                     if download in self.pending_downloads:
                         self.pending_downloads.remove(download)
+                    # Mark as completed dan add to batch untuk tracking
+                    self.completed_downloads.append(filename)
+                    self.current_download_batch.append(filename)
                     await download.cancel()
                     return
 
@@ -901,9 +904,24 @@ class DeviceScraper:
                         result["success"] = success
                         result["failure"] = failure
                         result["completed"] = True
-                        self.log(
-                            f"[+] Download initiated: {success} success, {failure} failure"
-                        )
+
+                        # Jika semua failure tapi sebenarnya di-skip karena sudah di DB
+                        if success == 0 and failure > 0:
+                            self.log(
+                                f"[+] Download result: {success} new, {failure} skipped/failed"
+                            )
+                            # Check apakah ada file di batch (berarti di-skip, bukan gagal)
+                            if len(self.current_download_batch) > 0:
+                                self.log(
+                                    f"[+] All {len(self.current_download_batch)} files were already downloaded (skipped)"
+                                )
+                                # Save DB
+                                self.save_downloaded_files_db(force_log=True)
+                                return result
+                        else:
+                            self.log(
+                                f"[+] Download initiated: {success} success, {failure} failure"
+                            )
 
                         # Wait for actual file downloads to complete
                         self.log("[*] Waiting for files to finish downloading...")
@@ -1243,6 +1261,13 @@ async def download_playback(scraper: DeviceScraper):
                     scraper.log(
                         f"[*] No files found on page {page} of {page_info['total']}"
                     )
+                    continue
+
+                # Cek jika semua file di page sudah di-download, skip retry dan lanjut ke page berikutnya
+                total_files_in_page = len(table_data)
+                already_downloaded_in_page = page_stats["downloaded_count"]
+                if total_files_in_page > 0 and already_downloaded_in_page == total_files_in_page:
+                    scraper.log(f"[✓] Semua file di halaman {page} sudah di-download, lanjut ke page berikutnya")
                     continue
 
                 # Retry logic: max 3 attempts per page
