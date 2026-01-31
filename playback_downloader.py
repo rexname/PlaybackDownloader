@@ -110,23 +110,28 @@ class DeviceScraper:
             self.log(f"[*] No previous database found for this date")
             self.downloaded_files_db_data = {"channels": {}}
 
-    def save_downloaded_files_db(self):
-        """Save database of downloaded files"""
+    def save_downloaded_files_db(self, force_log: bool = False):
+        """Save database of downloaded files
+        Args:
+            force_log: Force logging (default False untuk auto-save realtime)
+        """
         if not self.downloaded_files_db:
-            self.log("[!] Cannot save - database file not set")
+            if force_log:
+                self.log("[!] Cannot save - database file not set")
             return
 
         try:
             with open(self.downloaded_files_db, "w") as f:
                 json.dump(self.downloaded_files_db_data, f, indent=2)
 
-            # Count total
-            total_files = 0
-            for channel_data in self.downloaded_files_db_data["channels"].values():
-                for page_files in channel_data.get("pages", {}).values():
-                    total_files += len(page_files)
+            # Log hanya jika force atau setiap 10 files
+            if force_log:
+                total_files = 0
+                for channel_data in self.downloaded_files_db_data["channels"].values():
+                    for page_files in channel_data.get("pages", {}).values():
+                        total_files += len(page_files)
 
-            self.log(f"[+] Saved database: {total_files} files")
+                self.log(f"[+] Saved database: {total_files} files")
         except Exception as e:
             self.log(f"[-] Error saving database: {str(e)}")
 
@@ -179,6 +184,9 @@ class DeviceScraper:
         if filename not in channel_data["pages"][page_key]:
             channel_data["pages"][page_key].append(filename)
 
+            # Auto-save realtime setiap file (tanpa log spam)
+            self.save_downloaded_files_db(force_log=False)
+
     def get_page_stats(self, channel: int, page: int) -> dict:
         """Get statistik download untuk page tertentu
         Returns:
@@ -198,7 +206,7 @@ class DeviceScraper:
         files = channel_data["pages"][page_key]
         return {"downloaded_count": len(files), "files": files}
         if len(self.downloaded_files_set) % 10 == 0:
-            self.save_downloaded_files_db()
+            self.save_downloaded_files_db(force_log=True)
 
     async def save_cookies(self):
         """Save browser cookies to file"""
@@ -404,6 +412,7 @@ class DeviceScraper:
                     # Mark as downloaded in DB with channel/page context
                     if self.current_channel is not None and self.current_page is not None:
                         self.mark_file_downloaded(self.current_channel, self.current_page, filename)
+                        # Note: save sudah dipanggil di dalam mark_file_downloaded()
 
                     # Move to completed
                     if download in self.pending_downloads:
@@ -909,7 +918,7 @@ class DeviceScraper:
                                     f"[+] All {current_batch_downloads} files downloaded successfully"
                                 )
                                 # Save DB setelah batch selesai
-                                self.save_downloaded_files_db()
+                                self.save_downloaded_files_db(force_log=True)
                                 return result
 
                             if wait_count % 5 == 0:  # Log every 5 seconds
@@ -923,7 +932,7 @@ class DeviceScraper:
                             f"[+] Download completed with {len(self.current_download_batch)} files"
                         )
                         # Save DB
-                        self.save_downloaded_files_db()
+                        self.save_downloaded_files_db(force_log=True)
                         return result
 
                 # Check progress text
@@ -991,8 +1000,8 @@ class DeviceScraper:
                                     self.log(
                                         f"[+] All {current_batch_downloads} files downloaded successfully"
                                     )
-                                    # Save DB
-                                    self.save_downloaded_files_db()
+                                    # Save DB dengan logging
+                                    self.save_downloaded_files_db(force_log=True)
                                     return result
 
                                 if wait_count % 10 == 0:  # Log every 10 seconds
@@ -1006,7 +1015,7 @@ class DeviceScraper:
                                 f"[+] Download finished with {len(self.current_download_batch)} files"
                             )
                             # Save DB
-                            self.save_downloaded_files_db()
+                            self.save_downloaded_files_db(force_log=True)
                             return result
 
                     # Check for stalled progress
@@ -1021,7 +1030,7 @@ class DeviceScraper:
                         self.log("[!] Download progress unchanged for 60s, completing")
                         result["completed"] = True
                         # Save DB
-                        self.save_downloaded_files_db()
+                        self.save_downloaded_files_db(force_log=True)
                         return result
 
                 # Check if stop button disappeared
@@ -1031,7 +1040,7 @@ class DeviceScraper:
                     await asyncio.sleep(5)
                     result["completed"] = True
                     # Save DB
-                    self.save_downloaded_files_db()
+                    self.save_downloaded_files_db(force_log=True)
                     return result
 
                 await asyncio.sleep(2)
@@ -1039,18 +1048,18 @@ class DeviceScraper:
             self.log("[-] Download timeout")
             result["completed"] = False
             # Save DB even on timeout
-            self.save_downloaded_files_db()
+            self.save_downloaded_files_db(force_log=True)
             return result
         except Exception as error:
             self.log(f"[-] Error waiting for download completion: {str(error)}")
             # Save DB on error
-            self.save_downloaded_files_db()
+            self.save_downloaded_files_db(force_log=True)
             return {"success": 0, "failure": 0, "completed": False}
 
     async def close(self):
         """Close browser and cleanup"""
         # Final save of download DB
-        self.save_downloaded_files_db()
+        self.save_downloaded_files_db(force_log=True)
 
         if self.browser:
             await self.browser.close()
