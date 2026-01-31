@@ -26,8 +26,8 @@ class DeviceScraper:
         self.cookie_path = self.script_dir / "cookies.json"
         self.storage_path = self.script_dir / "storage.json"
         self.download_dir = self.script_dir / "downloads"
-        self.organized_dir = self.download_dir / "cctv"
-        self.log_file = Path("./log.txt")
+        self.organized_dir = Path("/var/cctv")
+        self.log_file = Path("/var/log/cctv_scrapper.log")
 
         # Database file - akan di-set sesuai tanggal target download
         self.downloaded_files_db = None
